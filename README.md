@@ -29,7 +29,7 @@ dependencies: [
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
-        .product(name: "AppeekyAnalytics", package: "AppeekyAnalytics"),
+        .product(name: "AppeekyAnalytics", package: "analytics-swift"),
     ]),
 ]
 ```
