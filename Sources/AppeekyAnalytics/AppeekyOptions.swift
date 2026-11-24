@@ -1,7 +1,7 @@
 import Foundation
 
 /// Version of this SDK; sent as `sdk: "swift/<version>"` with every batch.
-public let appeekySDKVersion = "0.1.0"
+public let appeekySDKVersion = "0.2.0"
 
 /// Appeeky's hosted ingest endpoint; self-hosted servers pass their own.
 public let appeekyDefaultEndpoint = URL(string: "https://ingest.appeeky.com/v1/ingest")!

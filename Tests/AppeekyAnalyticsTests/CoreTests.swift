@@ -116,8 +116,8 @@ final class CoreTests: XCTestCase {
         await sdk.start()
         await sdk.flush(force: true)
         for i in 1...5 { await sdk.track("e\(i)") }
-        let queued = (h.storage.json(queueKey) as? [[String: Any]])?.compactMap { $0["name"] as? String }
-        XCTAssertEqual(queued, ["e3", "e4", "e5"])
+        // first_open is never evicted before an ordinary event.
+        XCTAssertEqual(queued(h), ["first_open", "e4", "e5"])
     }
 
     func testFlushesWhenFlushAtIsReached() async {
@@ -384,5 +384,122 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(h.transport.allEvents.compactMap { $0["name"] as? String }, ["session_start", "first_open", "app_background"])
         let background = h.transport.allEvents.last?["props"] as? [String: Any]
         XCTAssertEqual(background?["foreground_ms"] as? Int, 3_000)
+    }
+
+    private func queued(_ h: Harness) -> [String] {
+        (h.storage.json(queueKey) as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
+    }
+
+    private func state(_ h: Harness) -> [String: Any] {
+        h.storage.json(stateKey) as? [String: Any] ?? [:]
+    }
+
+    func testPastTheQuotaTheInstallIsDeliveredAndOtherEventsWaitInTheQueue() async {
+        let h = Harness(statuses: [402, 402, 202])
+        let sdk = h.make()
+        await sdk.start()
+        await sdk.idle() // the boot flush: 402
+        // The server stored the install, its attribution and first_open.
+        XCTAssertEqual(h.transport.sent.count, 1)
+        XCTAssertNotNil(h.transport.sent[0].attribution)
+        XCTAssertEqual(queued(h), ["session_start"])
+        XCTAssertEqual(state(h)["attributionSent"] as? Bool, true)
+
+        // While waiting, only critical events go out, without the attribution.
+        await sdk.screen("Paywall")
+        await sdk.adRevenue(0.02, network: nil, adUnit: nil, format: nil)
+        await sdk.flush(force: true)
+        XCTAssertEqual(h.transport.sent.count, 2)
+        XCTAssertEqual(h.transport.sent[1].eventNames, ["ad_revenue"])
+        XCTAssertNil(h.transport.sent[1].attribution)
+        XCTAssertEqual(queued(h), ["session_start", "screen"])
+
+        // Nothing ordinary is sent before the wait is over, even when forced.
+        await sdk.flush(force: true)
+        XCTAssertEqual(h.transport.sent.count, 2)
+
+        h.clock.advance(16 * 60 * 1000)
+        await sdk.flush()
+        XCTAssertEqual(h.transport.sent.count, 3)
+        XCTAssertEqual(h.transport.sent[2].eventNames, ["session_start", "screen"])
+        XCTAssertEqual(queued(h), [])
+    }
+
+    func testASecondQuotaAnswerDoublesTheWaitAndKeepsTheQueue() async {
+        let h = Harness(statuses: [402, 402, 402])
+        let sdk = h.make()
+        await sdk.start()
+        await sdk.idle()
+        h.clock.advance(16 * 60 * 1000)
+        await sdk.flush()
+        XCTAssertEqual(h.transport.sent.count, 2)
+        h.clock.advance(16 * 60 * 1000) // the wait is 30 minutes now
+        await sdk.flush()
+        XCTAssertEqual(h.transport.sent.count, 2)
+        h.clock.advance(15 * 60 * 1000)
+        await sdk.flush()
+        XCTAssertEqual(h.transport.sent.count, 3)
+        XCTAssertEqual(queued(h), ["session_start"])
+    }
+
+    func testARejectedBatchDoesNotGiveUpTheAttributionAtOnce() async {
+        let h = Harness(statuses: [400, 202])
+        let sdk = h.make()
+        await sdk.start()
+        await sdk.idle() // the boot flush: 400
+        XCTAssertEqual(h.transport.sent.count, 1)
+        XCTAssertEqual(queued(h), [])
+        XCTAssertNotEqual(state(h)["attributionSent"] as? Bool, true)
+        XCTAssertEqual(state(h)["attributionRejects"] as? Int, 1)
+
+        await sdk.screen("Home")
+        await sdk.flush(force: true)
+        XCTAssertEqual(h.transport.sent.count, 2)
+        XCTAssertEqual(h.transport.sent[1].attribution as? [String: String], ["deepLinkUrl": "myapp://open?aky_c=launch"])
+        XCTAssertEqual(state(h)["attributionSent"] as? Bool, true)
+        XCTAssertNil(state(h)["attributionRejects"])
+    }
+
+    func testTheAttributionIsGivenUpAfterThreeRejectedBatches() async {
+        let h = Harness(statuses: [400, 400, 400, 202])
+        let sdk = h.make()
+        await sdk.start()
+        await sdk.idle()
+        for name in ["a", "b"] {
+            await sdk.track(name)
+            await sdk.flush(force: true)
+        }
+        XCTAssertEqual(h.transport.sent.count, 3)
+        XCTAssertEqual(state(h)["attributionSent"] as? Bool, true)
+        await sdk.track("c")
+        await sdk.flush(force: true)
+        XCTAssertEqual(h.transport.sent.count, 4)
+        XCTAssertNil(h.transport.sent[3].attribution)
+    }
+
+    func testAFullQueueEvictsOrdinaryEventsBeforeFirstOpenAndAdRevenue() async {
+        let h = Harness(statuses: [-1])
+        let sdk = h.make { $0.maxQueueSize = 3 }
+        await sdk.start()
+        await sdk.idle() // offline: session_start and first_open stay queued
+        await sdk.adRevenue(0.01, network: nil, adUnit: nil, format: nil)
+        await sdk.screen("A")
+        await sdk.screen("B")
+        XCTAssertEqual(queued(h), ["first_open", "ad_revenue", "screen"])
+    }
+
+    func testOverLongAttributionValuesAreCutToTheServersLimits() async {
+        var h = Harness()
+        h.launchURL = "myapp://open?aky_c=" + String(repeating: "x", count: 3_000)
+        let sdk = h.make {
+            $0.adServicesToken = { String(repeating: "t", count: 4_097) }
+            $0.resolveAdServicesOnDevice = false
+        }
+        await sdk.start()
+        await sdk.flush(force: true)
+        XCTAssertEqual((h.transport.sent[0].attribution?["deepLinkUrl"] as? String)?.utf16.count, 2_048)
+        // A token over the limit would reject the batch, so it is left out.
+        XCTAssertNil(h.transport.sent[0].attribution?["adServicesToken"])
+        XCTAssertEqual(h.transport.adServicesCalls, 0)
     }
 }

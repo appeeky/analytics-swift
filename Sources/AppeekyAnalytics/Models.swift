@@ -67,6 +67,8 @@ struct PersistedState: Codable, Equatable {
     var sessionId: String?
     var lastActiveAt: Int64?
     var attributionSent: Bool?
+    /// Batches the server rejected (4xx) while carrying the attribution.
+    var attributionRejects: Int?
     /// First launch time; "came back on a later day" is measured from it.
     var installedAt: Int64?
     /// Highest SKAdNetwork fine conversion value written so far.

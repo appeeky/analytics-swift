@@ -5,6 +5,20 @@ let queueKey = "queue"
 private let maxBatch = 100
 private let maxBackoffMs: Int64 = 5 * 60 * 1000
 private let attributionTimeoutMs: Int64 = 3_000
+/// The hosted service answers this once the account's monthly event quota is used up.
+private let quotaStatus = 402
+/// Wait before sending ordinary events again after a quota answer; doubles up to the maximum.
+private let quotaRetryMs: Int64 = 15 * 60 * 1000
+private let maxQuotaRetryMs: Int64 = 6 * 60 * 60 * 1000
+/// Events the server stores even past the quota, and the queue never evicts
+/// before ordinary ones. Keep in step with CRITICAL_EVENT_NAMES in
+/// packages/core/src/service.ts.
+private let criticalEvents: Set<String> = ["first_open", "ad_revenue"]
+/// A batch rejected this many times with the attribution in it: give the attribution up.
+private let maxAttributionRejects = 3
+/// Server limits (packages/core/src/ingest-payload.ts); longer values would reject the batch.
+private let maxTokenLength = 4_096
+private let maxURLLength = 2_048
 /// A single foreground stretch longer than this is clamped (clock jumps, stuck timers).
 private let maxForegroundMs: Int64 = 4 * 60 * 60 * 1000
 let adServicesURL = URL(string: "https://api-adservices.apple.com/api/v1/")!
@@ -97,6 +111,9 @@ actor AppeekyCore {
     private var cancelTimer: CancelHandle?
     private var backoffMs: Int64 = 0
     private var retryAt: Int64 = 0
+    /// While now < quotaUntil only critical events are sent; the rest wait in the queue.
+    private var quotaUntil: Int64 = 0
+    private var quotaBackoffMs: Int64 = 0
     /// When the app last came to the foreground; nil while in the background.
     private var foregroundSince: Int64?
     /// Launched in the background: first_open waits for the first foreground.
@@ -294,13 +311,14 @@ actor AppeekyCore {
         }
         attributionTask = Task {
             var collected = Attribution()
-            if let adServicesToken = await token.value, !adServicesToken.isEmpty {
+            if let adServicesToken = await token.value, !adServicesToken.isEmpty,
+               adServicesToken.utf16.count <= maxTokenLength {
                 collected.adServicesToken = adServicesToken
                 if self.config.resolveAdServicesOnDevice, let resolved = await self.resolveAdServices(adServicesToken) {
                     collected.adServices = resolved
                 }
             }
-            if let url = await launchURL.value, !url.isEmpty { collected.deepLinkUrl = url.prefixUTF16(2_048) }
+            if let url = await launchURL.value, !url.isEmpty { collected.deepLinkUrl = url.prefixUTF16(maxURLLength) }
             self.attribution = collected
         }
     }
@@ -353,8 +371,9 @@ actor AppeekyCore {
             props: props,
             value: value
         ))
-        if queue.count > config.maxQueueSize {
-            queue.removeFirst(queue.count - config.maxQueueSize)
+        // Full: the oldest ordinary event goes first; first_open and ad revenue stay.
+        while queue.count > config.maxQueueSize {
+            queue.remove(at: queue.firstIndex { !criticalEvents.contains($0.name) } ?? 0)
         }
         persistQueue()
         if queue.count >= config.flushAt { beginFlush(force: false) }
@@ -377,7 +396,8 @@ actor AppeekyCore {
         if state.attributionSent != true { await attributionTask?.value }
         while true {
             let sendAttribution = state.attributionSent != true && attribution != nil
-            let batch = Array(queue.prefix(maxBatch))
+            let quotaMode = deps.now() < quotaUntil
+            let batch = Array((quotaMode ? queue.filter { criticalEvents.contains($0.name) } : queue).prefix(maxBatch))
             if batch.isEmpty && !sendAttribution { return }
 
             let body = IngestBatch(
@@ -406,20 +426,59 @@ actor AppeekyCore {
                 retryAt = deps.now() + backoffMs
                 return
             }
-            // 2xx: stored. Other 4xx: the server will never accept this batch,
-            // so drop it rather than retrying forever.
-            if status >= 400 { log("batch rejected with HTTP \(status)") }
             backoffMs = 0
             retryAt = 0
+            let hadAttribution = body.attribution != nil
+
+            if status == quotaStatus {
+                // Past the account's quota the server stored the install, its
+                // attribution and the critical events. The other events stay
+                // queued and are sent again later.
+                let stored = Set(batch.filter { criticalEvents.contains($0.name) }.map(\.id))
+                queue.removeAll { stored.contains($0.id) }
+                if sendAttribution { markAttributionSent() }
+                persist()
+                persistQueue()
+                // Already waiting: go on with the critical events that are left.
+                if quotaMode { continue }
+                quotaBackoffMs = min(quotaBackoffMs > 0 ? quotaBackoffMs * 2 : quotaRetryMs, maxQuotaRetryMs)
+                quotaUntil = deps.now() + quotaBackoffMs
+                log("event quota used up: installs and ad revenue are still sent, other events wait")
+                return
+            }
+
             let sent = Set(batch.map(\.id))
             queue.removeAll { sent.contains($0.id) }
-            if sendAttribution {
-                state.attributionSent = true
-                attribution = nil
+            if status >= 400 {
+                // The server will never accept this batch: drop its events
+                // rather than retrying forever. The attribution is collected
+                // only once, so it rides on the next batches before it is
+                // given up.
+                log("batch rejected with HTTP \(status)")
+                if hadAttribution {
+                    let rejects = (state.attributionRejects ?? 0) + 1
+                    state.attributionRejects = rejects
+                    if rejects >= maxAttributionRejects { markAttributionSent() }
+                } else if sendAttribution {
+                    markAttributionSent()
+                }
+            } else {
+                quotaBackoffMs = 0
+                quotaUntil = 0
+                if sendAttribution { markAttributionSent() }
             }
             persist()
             persistQueue()
+            // Rejected with the attribution still pending: wait for new events
+            // instead of sending the attribution alone in a loop.
+            if status >= 400 && queue.isEmpty { return }
         }
+    }
+
+    private func markAttributionSent() {
+        state.attributionSent = true
+        state.attributionRejects = nil
+        attribution = nil
     }
 
     private func persist() {

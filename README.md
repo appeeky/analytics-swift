@@ -25,7 +25,7 @@ In a `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/appeeky/analytics-swift.git", from: "0.1.0"),
+    .package(url: "https://github.com/appeeky/analytics-swift.git", from: "0.2.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
@@ -155,7 +155,7 @@ Appeeky.configure(AppeekyOptions(
 | `adServicesToken` | built in | Replace the `AAAttribution.attributionToken()` call |
 | `flushInterval` | `10` s | How often queued events are sent while the app is open |
 | `flushAt` | `20` | Send as soon as this many events are queued |
-| `maxQueueSize` | `1000` | Oldest events are dropped beyond this |
+| `maxQueueSize` | `1000` | Oldest events are dropped beyond this; `first_open` and ad revenue go last |
 | `sessionTimeout` | `1800` s | Time in the background before a new session starts |
 | `context` | | Override device context fields |
 | `disabled` | `false` | Collect and send nothing |

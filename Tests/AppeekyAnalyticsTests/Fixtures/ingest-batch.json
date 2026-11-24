@@ -1,6 +1,6 @@
 {
   "installId": "6f1c1d2e-8a1b-4c3d-9e0f-112233445566",
-  "sdk": "swift/0.1.0",
+  "sdk": "swift/0.2.0",
   "context": {
     "platform": "ios",
     "appVersion": "2.3.0",
