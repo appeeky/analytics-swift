@@ -69,6 +69,7 @@ actor AppeekyCore {
         var resolveAdServicesOnDevice: Bool
         var adServicesToken: (@Sendable () async -> String?)?
         var context: DeviceContext?
+        var testDevice: Bool?
         var disabled: Bool
         var debug: Bool
 
@@ -82,6 +83,7 @@ actor AppeekyCore {
             resolveAdServicesOnDevice = options.resolveAdServicesOnDevice
             adServicesToken = options.adServicesToken
             context = options.context
+            testDevice = options.testDevice
             disabled = options.disabled
             debug = options.debug
         }
@@ -98,6 +100,8 @@ actor AppeekyCore {
     private var queue: [QueuedEvent]
     private var attribution: Attribution?
     private var context = DeviceContext()
+    /// Server warnings already handled in this launch.
+    private var warned: Set<String> = []
     private var bootTask: Task<Void, Never>?
     /// Resolves once first-launch attribution is collected; batches wait for it.
     private var attributionTask: Task<Void, Never>?
@@ -145,7 +149,9 @@ actor AppeekyCore {
     }
 
     private func boot() {
-        context = deps.deviceContext().merged(with: config.context).sanitized()
+        var detected = deps.deviceContext().merged(with: config.context)
+        if let testDevice = config.testDevice { detected.testDevice = testDevice }
+        context = detected.sanitized()
 
         if state.attributionSent != true {
             collectAttribution()
@@ -218,6 +224,9 @@ actor AppeekyCore {
     func identify(_ userId: String?) async {
         guard await ready() else { return }
         let id = userId.flatMap { $0.isEmpty ? nil : $0.prefixUTF16(256) }
+        // Apps call identify() on every launch. The id already rides on every
+        // batch's context, so only a change is worth an event.
+        if id == state.userId { return }
         state.userId = id
         persist()
         // The user id rides on every batch's context; this event makes sure a
@@ -415,7 +424,11 @@ actor AppeekyCore {
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.setValue(config.key, forHTTPHeaderField: "X-Appeeky-Key")
                 request.httpBody = try encoder.encode(body)
-                status = try await deps.transport.send(request).status
+                let response = try await deps.transport.send(request)
+                status = response.status
+                if (200..<300).contains(status) || status == quotaStatus {
+                    reportWarnings(serverWarnings(response.body))
+                }
             } catch {
                 log("batch not sent: \(error.localizedDescription)")
             }
@@ -489,9 +502,29 @@ actor AppeekyCore {
         if let data = try? encoder.encode(queue) { deps.storage.write(queueKey, data) }
     }
 
+    /// Server warnings about a stored batch, said once per launch on a test device or with `debug`.
+    private func reportWarnings(_ warnings: [String]) {
+        for warning in warnings where warned.insert(warning).inserted {
+            guard let text = warningText[warning], config.debug || context.testDevice == true else { continue }
+            deps.log("[appeeky-analytics] \(text)")
+        }
+    }
+
     private func log(_ message: String) {
         if config.debug { deps.log("[appeeky-analytics] \(message)") }
     }
+}
+
+private let warningText: [String: String] = [
+    "platform_mismatch":
+        "this key belongs to an app on the other store. Use the iOS app's key in the iOS build and the Android app's key in the Android build; until then both platforms are mixed in one app's reports.",
+]
+
+/// `warnings` of an ingest answer; empty when the body is missing or not the expected shape.
+func serverWarnings(_ body: Data) -> [String] {
+    guard let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+          let warnings = object["warnings"] as? [Any] else { return [] }
+    return warnings.compactMap { $0 as? String }
 }
 
 /// Apple's answer, flattened to at most 20 scalar fields (strings up to 256).

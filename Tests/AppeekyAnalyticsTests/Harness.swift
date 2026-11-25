@@ -44,10 +44,13 @@ final class FakeTransport: HTTPTransport, @unchecked Sendable {
     private var _sent: [SentBatch] = []
     private var _adServicesCalls = 0
     private let adServices: (@Sendable () -> (Int, Data))?
+    /// Body of every ingest answer.
+    private let ingestBody: Data
 
-    init(statuses: [Int] = [], adServices: (@Sendable () -> (Int, Data))? = nil) {
+    init(statuses: [Int] = [], adServices: (@Sendable () -> (Int, Data))? = nil, ingestBody: Data = Data()) {
         self.statuses = statuses
         self.adServices = adServices
+        self.ingestBody = ingestBody
     }
 
     var sent: [SentBatch] {
@@ -81,7 +84,24 @@ final class FakeTransport: HTTPTransport, @unchecked Sendable {
         _sent.append(SentBatch(url: request.url!, headers: request.allHTTPHeaderFields ?? [:], raw: raw, body: body))
         let status = statuses.isEmpty ? 202 : statuses.removeFirst()
         if status == -1 { throw OfflineError() }
-        return (status, Data())
+        return (status, ingestBody)
+    }
+}
+
+final class LogSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _lines: [String] = []
+
+    var lines: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lines
+    }
+
+    func append(_ line: String) {
+        lock.lock()
+        _lines.append(line)
+        lock.unlock()
     }
 }
 
@@ -150,9 +170,12 @@ struct Harness {
     var native: FakeNative?
     var launchURL: String? = "myapp://open?aky_c=launch"
     var launchedInBackground = false
+    /// What device detection reports; nil is a production install on a real device.
+    var testDevice: Bool?
+    let logs = LogSink()
 
-    init(statuses: [Int] = [], adServices: (@Sendable () -> (Int, Data))? = nil, native: FakeNative? = nil) {
-        transport = FakeTransport(statuses: statuses, adServices: adServices)
+    init(statuses: [Int] = [], adServices: (@Sendable () -> (Int, Data))? = nil, native: FakeNative? = nil, ingestBody: Data = Data()) {
+        transport = FakeTransport(statuses: statuses, adServices: adServices, ingestBody: ingestBody)
         self.native = native
     }
 
@@ -162,17 +185,19 @@ struct Harness {
         let clock = clock
         let ids = ids
         let launchURL = launchURL
+        let testDevice = testDevice
+        let logs = logs
         let deps = CoreDependencies(
             storage: storage,
             transport: transport,
             native: native,
             now: { clock.now },
             randomId: { "id\(ids.next())" },
-            deviceContext: { DeviceContext(platform: "ios", osVersion: "18.1", locale: "tr-TR") },
+            deviceContext: { DeviceContext(platform: "ios", osVersion: "18.1", locale: "tr-TR", testDevice: testDevice) },
             launchURL: { launchURL },
             sleep: { _ in await Task.yield() },
             startInterval: { _, _ in {} },
-            log: { _ in },
+            log: { logs.append($0) },
             launchedInBackground: launchedInBackground
         )
         return AppeekyCore(config: AppeekyCore.Config(options), deps: deps)

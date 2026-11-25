@@ -25,7 +25,7 @@ In a `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/appeeky/analytics-swift.git", from: "0.2.0"),
+    .package(url: "https://github.com/appeeky/analytics-swift.git", from: "0.3.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
@@ -143,7 +143,8 @@ Appeeky.configure(AppeekyOptions(
     resolveAdServicesOnDevice: true,
     context: DeviceContext(appVersion: "2.3.0"), // override detected fields
     disabled: false,                  // collect and send nothing, e.g. after an opt-out
-    debug: false                      // log rejected batches and network errors
+    debug: false,                     // log rejected batches and network errors
+    testDevice: nil                   // nil detects debug builds and the simulator
 ))
 ```
 
@@ -160,8 +161,18 @@ Appeeky.configure(AppeekyOptions(
 | `context` | | Override device context fields |
 | `disabled` | `false` | Collect and send nothing |
 | `debug` | `false` | Log rejected batches and network errors (os.Logger, subsystem `com.appeeky.analytics`) |
+| `testDevice` | detected | Report this install as a test install, or not; see *Test installs* |
 
 `Appeeky.installId` returns this install's id right after `configure`.
+
+### Test installs
+
+Debug builds and simulator runs are reported as test installs. They are kept
+out of your reports and shown in the dashboard's test data view, so
+development never inflates install or revenue numbers. Detection needs no
+setup; pass `testDevice: false` to count a debug build as a real install, or
+`testDevice: true` to mark any build (an internal release build, for example)
+as a test install.
 
 ## Identify with RevenueCat or Superwall
 
@@ -181,7 +192,8 @@ Appeeky.identify(nil)
 With Superwall, pass the same user id you give `Superwall.shared.identify(userId:)`;
 Superwall's webhook events are matched to the install by it. The id is sent
 with every batch, and `identify` makes a batch go out within about a second
-so the install is linked before the first purchase.
+so the install is linked before the first purchase. Calling `identify` on
+every launch is fine: the same id again sends nothing.
 
 ## Screens and events
 

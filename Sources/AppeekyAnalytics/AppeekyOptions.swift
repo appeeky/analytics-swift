@@ -1,7 +1,7 @@
 import Foundation
 
 /// Version of this SDK; sent as `sdk: "swift/<version>"` with every batch.
-public let appeekySDKVersion = "0.2.0"
+public let appeekySDKVersion = "0.3.0"
 
 /// Appeeky's hosted ingest endpoint; self-hosted servers pass their own.
 public let appeekyDefaultEndpoint = URL(string: "https://ingest.appeeky.com/v1/ingest")!
@@ -28,6 +28,8 @@ public struct AppeekyOptions: Sendable {
     public var adServicesToken: (@Sendable () async -> String?)?
     /// Override or fill in device context fields.
     public var context: DeviceContext?
+    /// Report this install as a test install; nil detects debug builds and the simulator.
+    public var testDevice: Bool?
     /// Collect nothing and send nothing (e.g. the user opted out).
     public var disabled: Bool
     /// Log rejected batches and network errors.
@@ -44,8 +46,10 @@ public struct AppeekyOptions: Sendable {
         adServicesToken: (@Sendable () async -> String?)? = nil,
         context: DeviceContext? = nil,
         disabled: Bool = false,
-        debug: Bool = false
+        debug: Bool = false,
+        testDevice: Bool? = nil
     ) {
+        self.testDevice = testDevice
         self.key = key
         self.endpoint = endpoint ?? appeekyDefaultEndpoint
         self.flushInterval = flushInterval

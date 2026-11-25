@@ -183,6 +183,129 @@ final class CoreTests: XCTestCase {
                        ["identify", "reset"])
     }
 
+    func testIdentifyWithTheSameIdDoesNothing() async {
+        let h = Harness()
+        let first = h.make()
+        await first.start()
+        await first.identify("u1")
+        await first.flush(force: true)
+        await first.idle()
+        let sentBefore = h.transport.sent.count
+        let queueBefore = h.storage.read(queueKey)
+
+        await first.identify("u1")
+        await first.idle()
+        await first.flush(force: true)
+        XCTAssertEqual(h.transport.sent.count, sentBefore, "no event, so nothing to send")
+        XCTAssertEqual(h.storage.read(queueKey), queueBefore)
+        await first.shutdown()
+
+        // The next launch calls identify() again with the persisted id.
+        let second = h.make()
+        await second.start()
+        await second.identify("u1")
+        await second.identify("")
+        await second.identify("u2")
+        await second.flush(force: true)
+        await second.idle()
+        XCTAssertEqual(h.transport.allEvents.compactMap { $0["name"] as? String }.filter { $0 == "identify" || $0 == "reset" },
+                       ["identify", "reset", "identify"])
+        XCTAssertEqual(h.transport.sent.last!.context["userId"] as? String, "u2")
+    }
+
+    func testIdentifyNilWithoutAUserDoesNothing() async {
+        let h = Harness()
+        let sdk = h.make()
+        await sdk.start()
+        await sdk.identify(nil)
+        await sdk.flush(force: true)
+        await sdk.idle()
+        XCTAssertFalse(h.transport.allEvents.contains { $0["name"] as? String == "reset" })
+    }
+
+    func testTestDeviceIsSentOnlyWhenTrue() async {
+        let production = Harness()
+        let sdk = production.make()
+        await sdk.start()
+        await sdk.flush(force: true)
+        XCTAssertNil(production.transport.sent[0].context["testDevice"])
+
+        var debugBuild = Harness()
+        debugBuild.testDevice = true
+        let sdk2 = debugBuild.make()
+        await sdk2.start()
+        await sdk2.flush(force: true)
+        XCTAssertEqual(debugBuild.transport.sent[0].context["testDevice"] as? Bool, true)
+    }
+
+    func testTestDeviceOptionOverridesDetection() async {
+        var debugBuild = Harness()
+        debugBuild.testDevice = true
+        let off = debugBuild.make { $0.testDevice = false }
+        await off.start()
+        await off.flush(force: true)
+        XCTAssertNil(debugBuild.transport.sent[0].context["testDevice"], "false is left out, never sent")
+
+        let production = Harness()
+        let on = production.make { $0.testDevice = true }
+        await on.start()
+        await on.flush(force: true)
+        XCTAssertEqual(production.transport.sent[0].context["testDevice"] as? Bool, true)
+
+        let viaContext = Harness()
+        let sdk = viaContext.make { $0.context = DeviceContext(testDevice: true) }
+        await sdk.start()
+        await sdk.flush(force: true)
+        XCTAssertEqual(viaContext.transport.sent[0].context["testDevice"] as? Bool, true)
+    }
+
+    func testPlatformMismatchWarningIsLoggedOncePerLaunchOnATestDevice() async {
+        let body = Data(#"{"accepted":2,"warnings":["platform_mismatch","something_new",7]}"#.utf8)
+        var h = Harness(ingestBody: body)
+        h.testDevice = true
+        let sdk = h.make()
+        await sdk.start()
+        await sdk.flush(force: true)
+        await sdk.track("again")
+        await sdk.flush(force: true)
+        XCTAssertEqual(h.transport.sent.count, 2)
+        XCTAssertEqual(h.logs.lines, [
+            "[appeeky-analytics] this key belongs to an app on the other store. Use the iOS app's key in the iOS build and the Android app's key in the Android build; until then both platforms are mixed in one app's reports.",
+        ])
+    }
+
+    func testServerWarningsNeedDebugOrATestDevice() async {
+        let body = Data(#"{"warnings":["platform_mismatch"]}"#.utf8)
+        let quiet = Harness(ingestBody: body)
+        let sdk = quiet.make()
+        await sdk.start()
+        await sdk.flush(force: true)
+        XCTAssertEqual(quiet.logs.lines, [])
+
+        // With debug on, and on the quota answer too.
+        let debug = Harness(statuses: [402], ingestBody: body)
+        let sdk2 = debug.make { $0.debug = true }
+        await sdk2.start()
+        await sdk2.flush(force: true)
+        XCTAssertEqual(debug.logs.lines.filter { $0.contains("other store") }.count, 1)
+
+        // A rejected batch's body is not read.
+        let rejected = Harness(statuses: [400], ingestBody: body)
+        let sdk3 = rejected.make { $0.debug = true }
+        await sdk3.start()
+        await sdk3.flush(force: true)
+        XCTAssertFalse(rejected.logs.lines.contains { $0.contains("other store") })
+    }
+
+    func testServerWarningsAreParsedDefensively() {
+        XCTAssertEqual(serverWarnings(Data()), [])
+        XCTAssertEqual(serverWarnings(Data("not json".utf8)), [])
+        XCTAssertEqual(serverWarnings(Data("[1]".utf8)), [])
+        XCTAssertEqual(serverWarnings(Data(#"{"accepted":1}"#.utf8)), [])
+        XCTAssertEqual(serverWarnings(Data(#"{"warnings":"platform_mismatch"}"#.utf8)), [])
+        XCTAssertEqual(serverWarnings(Data(#"{"warnings":["a",1,null,"b"]}"#.utf8)), ["a", "b"])
+    }
+
     func testDisabledSendsNothing() async {
         let h = Harness()
         let sdk = h.make { $0.disabled = true }

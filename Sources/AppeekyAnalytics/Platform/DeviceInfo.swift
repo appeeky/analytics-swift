@@ -21,8 +21,21 @@ enum DeviceInfo {
             build: info?["CFBundleVersion"] as? String,
             osVersion: osVersion,
             deviceModel: hardwareModel(),
-            locale: bcp47Locale()
+            locale: bcp47Locale(),
+            testDevice: isTestDevice ? true : nil
         )
+    }
+
+    /// A debug build of the app, or a simulator run. SwiftPM compiles this
+    /// package in the app's configuration, so `DEBUG` follows the host app.
+    static var isTestDevice: Bool {
+        #if targetEnvironment(simulator)
+        return true
+        #elseif DEBUG
+        return true
+        #else
+        return false
+        #endif
     }
 
     /// `iPhone16,2`; on the simulator, the simulated device's identifier.

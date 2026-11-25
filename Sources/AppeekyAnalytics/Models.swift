@@ -12,6 +12,9 @@ public struct DeviceContext: Codable, Sendable, Equatable {
     public var deviceModel: String?
     /// BCP 47 locale such as `tr-TR`.
     public var locale: String?
+    /// A debug build or a simulator run. The server stores the install and
+    /// keeps it out of reports. Detected by default; see ``AppeekyOptions/testDevice``.
+    public var testDevice: Bool?
 
     public init(
         platform: String? = nil,
@@ -19,7 +22,8 @@ public struct DeviceContext: Codable, Sendable, Equatable {
         build: String? = nil,
         osVersion: String? = nil,
         deviceModel: String? = nil,
-        locale: String? = nil
+        locale: String? = nil,
+        testDevice: Bool? = nil
     ) {
         self.platform = platform
         self.appVersion = appVersion
@@ -27,6 +31,7 @@ public struct DeviceContext: Codable, Sendable, Equatable {
         self.osVersion = osVersion
         self.deviceModel = deviceModel
         self.locale = locale
+        self.testDevice = testDevice
     }
 
     /// Fields set in `override` win.
@@ -38,7 +43,8 @@ public struct DeviceContext: Codable, Sendable, Equatable {
             build: override.build ?? build,
             osVersion: override.osVersion ?? osVersion,
             deviceModel: override.deviceModel ?? deviceModel,
-            locale: override.locale ?? locale
+            locale: override.locale ?? locale,
+            testDevice: override.testDevice ?? testDevice
         )
     }
 
@@ -55,7 +61,9 @@ public struct DeviceContext: Codable, Sendable, Equatable {
             build: clean(build, 64),
             osVersion: clean(osVersion, 64),
             deviceModel: clean(deviceModel, 128),
-            locale: clean(locale, 35)
+            locale: clean(locale, 35),
+            // Only ever sent as `true`; a production install leaves it out.
+            testDevice: testDevice == true ? true : nil
         )
     }
 }
@@ -109,9 +117,11 @@ struct BatchContext: Encodable {
     var osVersion: String?
     var deviceModel: String?
     var locale: String?
+    var testDevice: Bool?
     var userId: String?
 
     init(_ context: DeviceContext, userId: String?) {
+        testDevice = context.testDevice == true ? true : nil
         platform = context.platform
         appVersion = context.appVersion
         build = context.build

@@ -123,7 +123,10 @@ final class PayloadTests: XCTestCase {
         try shortText(body["sdk"], 64)
 
         let context = try XCTUnwrap(body["context"] as? [String: Any])
-        XCTAssertTrue(Set(context.keys).isSubset(of: ["platform", "appVersion", "build", "osVersion", "deviceModel", "locale", "userId"]))
+        XCTAssertTrue(Set(context.keys).isSubset(of: ["platform", "appVersion", "build", "osVersion", "deviceModel", "locale", "testDevice", "userId"]))
+        if let testDevice = context["testDevice"] {
+            XCTAssertEqual((testDevice as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() }, true)
+        }
         if let platform = context["platform"] { XCTAssertTrue(["ios", "android"].contains(platform as? String)) }
         for (key, max) in [("appVersion", 64), ("build", 64), ("osVersion", 64), ("deviceModel", 128), ("locale", 35), ("userId", 256)] {
             if let value = context[key] { try shortText(value, max) }
